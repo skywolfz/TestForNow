@@ -1,0 +1,127 @@
+#!/usr/bin/env python
+
+from netmiko import ConnectHandler
+import os, re, csv, getpass, datetime
+
+from device import device_dict, send_and_append, add_to_output
+
+with open('hostlist.csv') as f:
+    hostlist = list(csv.reader(f))
+
+lines = ('-' * 80 + '\n')
+for line in hostlist:
+    if 'IP Address' in line:
+        continue
+    else:
+        device = device_dict(line, 'SSH')
+
+    text = '{}'.format(lines)
+    try:
+        print(lines)
+        print('ATTEMPTING SSH CONNECTION TO {}'.format(device['ip']))
+        print('Please wait...')
+        net_connect = ConnectHandler(**device)
+        print('SUCCESS. Connected to ' + device['ip'])
+    except:
+        print('***SSH connection FAILED to {}***'.format(device['ip']))
+        try:
+            device = device_dict(line, 'Telnet')
+            print('ATTEMPTING TELNET CONNECTION TO {}'.format(device['ip']))
+            print('Please wait...')
+            net_connect = ConnectHandler(**device)
+            print('SUCCESS. Connected to ' + device['ip'])
+        except:
+            print('***TELNET connection FAILED to {}***'.format(device['ip']))
+            print('Please verify connectivity to device')
+            print('IP address has been logged\n{}'.format(lines))
+            time_stamp = datetime.datetime.now().strftime("%A, %d, %B %Y %I:%M%p")
+            outputFile = open('failedconnections.txt', 'a')
+            outputFile.write(lines)
+            outputFile.write('Connection failed to {} - {} \n'.format(device['ip'], time_stamp))
+            outputFile.close()
+            continue
+
+    net_connect.send_command('term len 0')
+    output = net_connect.send_command('show run')
+    hostRegex = re.compile(r'hostname (.*)')
+    hostname = hostRegex.search(output).group(1)
+    text += add_to_output(hostname, 'show run', output)
+
+    with open('devices.csv') as f:
+        csv_reader = csv.DictReader(f)
+        for row in csv_reader:
+            if row['device'] in hostname:
+                device_model = row['device']
+                device_type = row['type']
+                break
+    if device_model:
+        pass
+    else:
+        print('Device model not in list of supported devices, please verify supported devices in devices.csv')
+        continue
+
+    print('\n{:30}{:30}{:30}'.format('HOSTNAME', 'IP ADDR', 'TYPE'))
+    print('{:30}{:30}{:30}\n'.format(hostname, device['ip'], device_model))
+    print('Sending commands: ')
+
+    ip_output = net_connect.send_command('show ip int brief')
+    gig_int_list = [line.split()[0] for line in ip_output.splitlines() if line.startswith('Gi')]
+    int_list = [line.split()[0] for line in ip_output.splitlines() if line.startswith('Ten')]
+    vlan_list = [line.split()[0] for line in ip_output.splitlines() if line.startswith('Vlan')]
+
+    commands = open('commands/{}.txt'.format(device_type)).read().splitlines()
+    for command in commands:
+        if command == 'show run':
+            print(command)
+            continue
+        elif line == 'show ip int brief':
+            print(command)
+            text += add_to_output(hostname, command, ip_output)
+        elif command == 'show ip arp':
+            if device_type == 'core_final' or device_type == 'core_existing':
+                for v in vlan_list:
+                    vlan = '{} {}'.format(v[:4], v[4:])
+                    new_command = '{} {}'.format(command, vlan)
+                    print(new_command)
+                    text += send_and_append(net_connect, hostname, new_command)
+        elif command == 'show mac address-table':
+            if device_type == 'core_final' or device_type == 'core_existing':
+                for v in vlan_list:
+                    vlan = '{} {}'.format(v[:4], v[4:])
+                    new_command = '{} {}'.format(command, vlan)
+                    print(new_command)
+                    text += send_and_append(net_connect, hostname, new_command)
+            else:
+                print(command)
+                text += send_and_append(net_connect, hostname, command)
+        elif command == 'show mac address-table | i':
+            if device_type == 'core_final':
+                for int in gig_int_list:
+                    new_command = '{} {}'.format(command, int)
+                    print(new_command)
+                    text += send_and_append(net_connect, hostname, new_command)
+        elif command == 'show cdp neighbor':
+            if device_type == 'core_final':
+                for int in gig_int_list:
+                    new_command = '{} {} de | in Dev|interface|IP'.format(command, int)
+                    print(new_command)
+                    text += send_and_append(net_connect, hostname, new_command)
+                for int in int_list:
+                    new_command = '{} {} de | in Dev|interface|IP'.format(command, int)
+                    print(new_command)
+                    text += send_and_append(net_connect, hostname, new_command)
+            else:
+                print(command)
+                text += send_and_append(net_connect, hostname, command)
+        else:
+            print(command)
+            text += send_and_append(net_connect, hostname, command)
+
+    filename = '{}-{}.log'.format(hostname,device['ip'])
+    print('\nConfigs successfully saved to {}'.format(filename))
+    print('-' * 80)
+    print()
+    outputFile = open('logs/{}'.format(filename), 'w')
+    outputFile.write(text)
+    outputFile.close()
+print('Job completed')
